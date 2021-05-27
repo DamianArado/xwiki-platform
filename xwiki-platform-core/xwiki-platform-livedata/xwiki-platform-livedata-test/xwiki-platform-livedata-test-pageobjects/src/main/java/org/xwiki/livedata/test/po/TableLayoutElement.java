@@ -19,14 +19,22 @@
  */
 package org.xwiki.livedata.test.po;
 
+import java.util.Arrays;
 import java.util.List;
 import java.util.stream.Collectors;
 
+import org.hamcrest.Description;
+import org.hamcrest.TypeSafeMatcher;
 import org.openqa.selenium.By;
 import org.openqa.selenium.WebElement;
+import org.openqa.selenium.interactions.Actions;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.xwiki.test.ui.po.BaseElement;
+import org.xwiki.test.ui.po.FormContainerElement;
+
+import static org.hamcrest.CoreMatchers.hasItem;
+import static org.hamcrest.MatcherAssert.assertThat;
 
 /**
  * Provides the operations to interact with a Live Data when displayed with a table layout.
@@ -36,6 +44,56 @@ import org.xwiki.test.ui.po.BaseElement;
  */
 public class TableLayoutElement extends BaseElement
 {
+    /**
+     * A matcher for the cell containing links. The matcher assert of a given {@link WebElement} contains a {@code a}
+     * tag with the expected text and link.
+     */
+    private static class CellWithLinkMatcher extends TypeSafeMatcher<WebElement>
+    {
+        private final String text;
+
+        private final String link;
+
+        /**
+         * Initializes the matcher with the expected text and link.
+         *
+         * @param text the expected text of the {@code a} tag
+         * @param link the expected link of the {@code a} tag
+         */
+        CellWithLinkMatcher(String text, String link)
+        {
+            this.text = text;
+            this.link = link;
+        }
+
+        @Override
+        protected boolean matchesSafely(WebElement item)
+        {
+            boolean hasExpectedText = item.getText().equals(this.text);
+            // URL equality, possibly adding a trailing / to the passed link if missing.
+            String hrefValue = item.findElement(By.tagName("a")).getAttribute("href");
+            boolean hasExpectedLink = hrefValue.equals(this.link) || hrefValue.equals(this.link + '/');
+            return hasExpectedText && hasExpectedLink;
+        }
+
+        @Override
+        protected void describeMismatchSafely(WebElement item, Description mismatchDescription)
+        {
+            mismatchDescription.appendText(item.getAttribute("innerHTML"));
+        }
+
+        @Override
+        public void describeTo(Description description)
+        {
+            description.appendText("a link with text ");
+            description.appendValue(this.text);
+            description.appendText(" and link ");
+            description.appendValue(this.link);
+        }
+    }
+
+    private static final String SELECT_CELLS_BY_COLUMN_INDEX = "tr td:nth-child(%d)";
+
     private static final Logger LOGGER = LoggerFactory.getLogger(TableLayoutElement.class);
 
     private final String liveDataId;
@@ -51,30 +109,66 @@ public class TableLayoutElement extends BaseElement
     }
 
     /**
-     * Checks if the a column contains a value.
+     * Assert if the a column contains a value.
      *
      * @param columnLabel a column label (for instance {@code Title})
      * @param value the value to be found in the column
-     * @return {@code true} if the value is found in the column, {@code false} otherwise
      */
-    public boolean hasRow(String columnLabel, String value)
+    public void assertRow(String columnLabel, String value)
     {
         // TODO: currently only equality of the cell's text value is supported, this might not be convenient for some
-        // cells types.
-        return getValues(columnLabel)
+        List<String> columnTextValues = getValues(columnLabel)
             .stream()
             .map(WebElement::getText)
-            .anyMatch(it -> it.equals(value));
+            .collect(Collectors.toList());
+        assertThat(columnTextValues, hasItem(value));
     }
 
     /**
-     * Waits until the table has content displayed and loaded. Do not use this method if you expect the livedata to be
-     * displayed without content.
+     * Assert if the column contains a link with the given name and url.
+     *
+     * @param columnName the column name
+     * @param text the text of the link to be found in the column
+     * @param link the href value of the link to be found in the column
+     */
+    public void assertCellWithLink(String columnName, String text, String link)
+    {
+        assertThat(getValues(columnName), hasItem(new CellWithLinkMatcher(text, link)));
+    }
+
+    /**
+     * Waits until the table has content displayed and loaded. If you expect the Live Data to be displayed without
+     * content, see {@link #waitUntilReady(boolean)}.
+     *
+     * @see #waitUntilReady(boolean)
      */
     public void waitUntilReady()
     {
+        waitUntilReady(true);
+    }
+
+    /**
+     * Waits until the table has content displayed and loaded. Use {@link #waitUntilReady()} for the default behavior.
+     *
+     * @param expectRows when {@code true} waits for rows to be displayed and loaded, when {@code false} continue
+     *     without waiting for the content
+     * @see #waitUntilReady()
+     */
+    public void waitUntilReady(boolean expectRows)
+    {
         // Waits for all the live data to be loaded and the cells to be finished loading.
-        getDriver().waitUntilCondition(webDriver -> hasLines() && areCellsLoaded() && noFiltering(), 20);
+        getDriver().waitUntilCondition(webDriver -> {
+            boolean isWaiting = Arrays
+                .asList(getRoot().findElement(By.cssSelector(".layout-loader")).getAttribute("class").split("\\s+"))
+                .contains("waiting");
+            if (isWaiting) {
+                return false;
+            }
+            if (!noFiltering()) {
+                return false;
+            }
+            return !expectRows || hasLines() && areCellsLoaded();
+        }, 20);
     }
 
     /**
@@ -141,30 +235,31 @@ public class TableLayoutElement extends BaseElement
 
     /**
      * Set the value in the filter of a column and wait for the filtered results to be displayed. See {@link
-     * #filterColumn(int, String, boolean)} to filter without waiting.
+     * #filterColumn(String, String, boolean)} to filter without waiting.
      *
-     * @param columnIndex the index of the column to filter, for instance 2 for the second column
+     * @param columnLabel the label of the column to filter, for instance {@code "Title"}
      * @param content the content to set on the filter
-     * @see #filterColumn(int, String, boolean)
+     * @see #filterColumn(String, String, boolean)
      */
-    public void filterColumn(int columnIndex, String content)
+    public void filterColumn(String columnLabel, String content)
     {
-        filterColumn(columnIndex, content, true);
+        filterColumn(columnLabel, content, true);
     }
 
     /**
      * Set the value in the filter of a column. Waits for the new filtered values to be displayed before continuing when
      * {@code waits} is {@code true}.
      *
-     * @param columnIndex the index of the column to filter, for instance 2 for the second column
+     * @param columnLabel the label of the column to filter, for instance {@code "Creation Date"}
      * @param content the content to set on the filter
      * @param wait when {@code true} waits for the filtered results to be displayed before continuing, otherwise
      *     continues without waiting (useful when updating several filters in a row).
-     * @see #filterColumn(int, String)
+     * @see #filterColumn(String, String)
      */
-    public void filterColumn(int columnIndex, String content, boolean wait)
+    public void filterColumn(String columnLabel, String content, boolean wait)
     {
         // TODO: adapt for other types of filters
+        int columnIndex = findColumnIndex(columnLabel);
         WebElement element = getRoot()
             .findElement(By.cssSelector(String.format(".column-filters > th:nth-child(%d) > input", columnIndex)));
         element.clear();
@@ -186,13 +281,13 @@ public class TableLayoutElement extends BaseElement
      * Return the {@link WebElement} of a cell by its row and column numbers. For instance the second row of the first
      * column is {@code (2, 1)}
      *
+     * @param columnLabel the label of the column to get, for instance {@code "Title"}
      * @param rowNumber the cell row number to get, starting at 1. For instance the second column has the number 2
-     * @param columnNumber the cell column number to get, starting at 1. For instance the third row has the number
-     *     3
      * @return the {@link WebElement} of the requested cell
      */
-    public WebElement getCell(int rowNumber, int columnNumber)
+    public WebElement getCell(String columnLabel, int rowNumber)
     {
+        int columnNumber = findColumnIndex(columnLabel);
         return getRoot().findElement(
             By.cssSelector(String.format("tbody tr:nth-child(%d) td:nth-child(%d)", rowNumber, columnNumber)));
     }
@@ -211,24 +306,58 @@ public class TableLayoutElement extends BaseElement
     }
 
     /**
-     * Checks if the column contains a link with the given name and url.
+     * Set a new value to a field in the nth cell of a column. Waits for the cell to be successfully edited before
+     * continuing.
      *
-     * @param columnName the column name
-     * @param text the text of the link to be found in the column
-     * @param link the href value of the link to be found in the column
-     * @return {@code true} if a cell of the column has a link with the expected text and link
+     * @param columnLabel the label of the column
+     * @param rowNumber the number of the row to update (the first line is number 1)
+     * @param fieldName the name of the field to edit, in other word the name of the corresponding XClass property
+     * @param newValue the new value of the StaticList
      */
-    public boolean hasCellWithLink(String columnName, String text, String link)
+    public void editCell(String columnLabel, int rowNumber, String fieldName, String newValue)
     {
-        return getValues(columnName)
-            .stream()
-            .anyMatch(it -> {
-                boolean hasExpectedText = it.getText().equals(text);
-                // URL equality, possibly adding a trailing / to the passed link if missing.
-                String hrefValue = it.findElement(By.tagName("a")).getAttribute("href");
-                boolean hasExpectedLink = hrefValue.equals(link) || hrefValue.equals(link + '/');
-                return hasExpectedText && hasExpectedLink;
-            });
+        int columnIndex = getColumnIndex(columnLabel);
+        WebElement element = getCellsByColumnIndex(columnIndex).get(rowNumber - 1);
+
+        // Double click on the cell.
+        new Actions(getDriver().getWrappedDriver()).doubleClick(element).perform();
+
+        // Selector of the edited field.
+        By selector = By.cssSelector(String.format("[name$='_%s']", fieldName));
+        
+        // Waits for the text input to be displayed.
+        getDriver().waitUntilCondition(input -> !element.findElements(selector).isEmpty());
+
+        // Reuse the FormContainerElement to avoid code duplication of the interaction with the form elements 
+        // displayed in the live data (they are the same as the one of the inline edit mode).
+        new FormContainerElement(By.cssSelector(".livedata-displayer.edit"))
+            .setFieldValue(element.findElement(selector), newValue);
+
+        // Clicks somewhere outside the edited cell.
+        new Actions(getDriver().getWrappedDriver()).click(getRoot()).perform();
+
+        // Waits for the field to be reload before continuing.
+        getDriver().waitUntilCondition(input -> {
+            // Nothing is loading.
+            boolean noLoader = element.findElements(By.cssSelector(".xwiki-loader")).isEmpty();
+            // And the edited field is not displayed anymore.
+            boolean noInput = element.findElements(selector).isEmpty();
+            return noLoader && noInput;
+        });
+    }
+
+    /**
+     * Returns a single {@link WebElement} found by passing {@code by} to {@link WebElement#findElement(By)} on the
+     * {@link WebElement} of the requested row.
+     *
+     * @param rowNumber the requested row by its row number, the first row has the number {@code 1}
+     * @param by the selector to apply on the row web element
+     * @return the {@link WebElement} found on the row
+     */
+    public WebElement findElementInRow(int rowNumber, By by)
+    {
+        return getRoot().findElement(By.cssSelector(String.format("tbody tr:nth-child(%d)", rowNumber)))
+            .findElement(by);
     }
 
     /**
@@ -252,7 +381,7 @@ public class TableLayoutElement extends BaseElement
     private List<WebElement> getValues(String columnLabel)
     {
         int columnIndex = getColumnIndex(columnLabel);
-        return getRoot().findElements(By.cssSelector(String.format("tr td:nth-child(%d)", columnIndex)));
+        return getRoot().findElements(By.cssSelector(String.format(SELECT_CELLS_BY_COLUMN_INDEX, columnIndex)));
     }
 
     /**
@@ -280,7 +409,6 @@ public class TableLayoutElement extends BaseElement
         return getRoot().findElements(By.cssSelector(".column-filters .livedata-filter.filtering")).isEmpty();
     }
 
-
     /**
      * @return the text of the columns currently displayed in the live data
      */
@@ -295,5 +423,23 @@ public class TableLayoutElement extends BaseElement
     private WebElement getRoot()
     {
         return getDriver().findElementById(this.liveDataId);
+    }
+
+    private int findColumnIndex(String columnLabel)
+    {
+        List<WebElement> elements = getRoot().findElements(By.cssSelector("thead tr th .property-name"));
+        int index = -1;
+        for (int i = 0; i < elements.size(); i++) {
+            if (elements.get(i).getText().equals(columnLabel)) {
+                index = i + 1;
+                break;
+            }
+        }
+        return index;
+    }
+
+    private List<WebElement> getCellsByColumnIndex(int columnIndex)
+    {
+        return getRoot().findElements(By.cssSelector(String.format(SELECT_CELLS_BY_COLUMN_INDEX, columnIndex)));
     }
 }
